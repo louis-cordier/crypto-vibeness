@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Multi-user chat client (IRC-like, no auth, no encryption)."""
+"""Multi-user chat client with password authentication."""
 
 import socket
 import threading
 import json
 import sys
+import getpass
 
 DEFAULT_PORT = 5555
 RESET = "\033[0m"
@@ -17,6 +18,11 @@ class ChatClient:
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.running = True
         self.username: str | None = None
+        self.authenticated = threading.Event()
+        self._buf = ""
+        self._msg_queue: list[dict] = []
+        self._msg_lock = threading.Lock()
+        self._msg_ready = threading.Event()
 
     # ── network ──────────────────────────────────────────────────────
 
@@ -25,7 +31,7 @@ class ChatClient:
         self.sock.sendall(msg.encode("utf-8"))
 
     def _recv_loop(self):
-        buf = ""
+        """Receive messages: queue during auth, display after."""
         try:
             while self.running:
                 chunk = self.sock.recv(4096)
@@ -33,29 +39,57 @@ class ChatClient:
                     if self.running:
                         print("\n\033[91mDisconnected from server.\033[0m")
                     self.running = False
+                    self._msg_ready.set()
                     break
-                buf += chunk.decode("utf-8")
-                while "\n" in buf:
-                    line, buf = buf.split("\n", 1)
+                self._buf += chunk.decode("utf-8")
+                while "\n" in self._buf:
+                    line, self._buf = self._buf.split("\n", 1)
                     try:
-                        self._handle(json.loads(line))
+                        msg = json.loads(line)
                     except json.JSONDecodeError:
-                        pass
+                        continue
+                    if self.authenticated.is_set():
+                        self._display(msg)
+                    else:
+                        with self._msg_lock:
+                            self._msg_queue.append(msg)
+                            self._msg_ready.set()
         except (ConnectionResetError, OSError):
             if self.running:
                 print("\n\033[91mConnection lost.\033[0m")
             self.running = False
+            self._msg_ready.set()
+
+    def _wait_msg(self) -> dict | None:
+        """Wait for the next message during auth phase."""
+        while self.running:
+            self._msg_ready.wait(timeout=0.5)
+            with self._msg_lock:
+                if self._msg_queue:
+                    msg = self._msg_queue.pop(0)
+                    if not self._msg_queue:
+                        self._msg_ready.clear()
+                    return msg
+        return None
+
+    def _drain_messages(self) -> list[dict]:
+        """Get all pending messages."""
+        with self._msg_lock:
+            msgs = list(self._msg_queue)
+            self._msg_queue.clear()
+            self._msg_ready.clear()
+        return msgs
 
     # ── display ──────────────────────────────────────────────────────
 
-    def _handle(self, msg: dict):
+    def _display(self, msg: dict):
         t = msg.get("type")
 
         if t == "prompt":
             print(msg["content"], end="", flush=True)
 
         elif t == "error":
-            print(f"\033[91m✗ {msg['content']}\033[0m", end="", flush=True)
+            print(f"\n\033[91m✗ {msg['content']}\033[0m", flush=True)
 
         elif t == "welcome":
             self.username = msg.get("username")
@@ -86,6 +120,38 @@ class ChatClient:
             print(f"\033[93m{msg['content']}\033[0m")
             self.running = False
 
+    # ── authentication phase ─────────────────────────────────────────
+
+    def _auth_phase(self) -> bool:
+        """Handle login/register before entering the chat loop."""
+        while self.running:
+            msg = self._wait_msg()
+            if msg is None:
+                return False
+            t = msg.get("type")
+
+            if t == "prompt":
+                print(msg["content"], end="", flush=True)
+                text = input()
+                self._send(text)
+
+            elif t == "auth_prompt":
+                pwd = getpass.getpass(msg["content"])
+                self._send(pwd)
+
+            elif t == "error":
+                print(f"\033[91m✗ {msg['content']}\033[0m", flush=True)
+
+            elif t == "system":
+                print(f"\033[93m⚡ {msg['content']}\033[0m")
+
+            elif t == "welcome":
+                self.username = msg.get("username")
+                print(f"\n\033[92m{msg['content']}\033[0m")
+                return True
+
+        return False
+
     # ── main ─────────────────────────────────────────────────────────
 
     def start(self):
@@ -96,6 +162,18 @@ class ChatClient:
             return
 
         threading.Thread(target=self._recv_loop, daemon=True).start()
+
+        # Phase 1: authentication (sequential input)
+        if not self._auth_phase():
+            self.running = False
+            self.sock.close()
+            print("Disconnected.")
+            return
+
+        # Phase 2: chat loop
+        self.authenticated.set()
+        for msg in self._drain_messages():
+            self._display(msg)
 
         try:
             while self.running:

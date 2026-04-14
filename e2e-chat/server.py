@@ -1,14 +1,22 @@
 #!/usr/bin/env python3
-"""Multi-user chat server (IRC-like, no auth, no encryption)."""
+"""Multi-user chat server with MD5 password authentication."""
 
 import socket
 import threading
 import json
 import sys
 import hashlib
+import hmac
+import base64
 import datetime
+import math
+import re
+import os
+import string
 
 DEFAULT_PORT = 5555
+PASSWORD_FILE = "this_is_safe.txt"
+RULES_FILE = "password_rules.json"
 
 COLORS = [
     "\033[31m", "\033[32m", "\033[33m", "\033[34m", "\033[35m", "\033[36m",
@@ -29,6 +37,100 @@ class ChatServer:
         now = datetime.datetime.now()
         log_filename = f"log_{now.strftime('%Y-%m-%d_%H-%M-%S')}.txt"
         self.log_file = open(log_filename, "a", encoding="utf-8")
+
+        self.passwords = self._load_passwords()
+        self.password_rules = self._load_rules()
+
+    # ── password storage ─────────────────────────────────────────────
+
+    @staticmethod
+    def _generate_salt() -> str:
+        """Generate a random 16-byte salt, encoded in base64."""
+        return base64.b64encode(os.urandom(16)).decode()
+
+    @staticmethod
+    def _hash_password(password: str, salt: str) -> str:
+        """MD5 hash of salt+password, encoded in base64."""
+        md5 = hashlib.md5((salt + password).encode()).digest()
+        return base64.b64encode(md5).decode()
+
+    def _load_passwords(self) -> dict[str, dict]:
+        """Load username:{salt, hash} from this_is_safe.txt."""
+        pw = {}
+        if os.path.exists(PASSWORD_FILE):
+            with open(PASSWORD_FILE, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if ":" in line:
+                        parts = line.split(":", 2)
+                        if len(parts) == 3:
+                            user, salt, hashed = parts
+                            pw[user] = {"salt": salt, "hash": hashed}
+        return pw
+
+    def _save_passwords(self):
+        with open(PASSWORD_FILE, "w", encoding="utf-8") as f:
+            for user, data in self.passwords.items():
+                f.write(f"{user}:{data['salt']}:{data['hash']}\n")
+
+    def _verify_password(self, username: str, password: str) -> bool:
+        """Constant-time password comparison."""
+        data = self.passwords.get(username)
+        if not data:
+            return False
+        candidate = self._hash_password(password, data["salt"])
+        return hmac.compare_digest(data["hash"], candidate)
+
+    # ── password rules ───────────────────────────────────────────────
+
+    def _load_rules(self) -> list[dict]:
+        if os.path.exists(RULES_FILE):
+            with open(RULES_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data.get("rules", [])
+        return []
+
+    def _check_password_rules(self, password: str) -> list[str]:
+        """Return list of violated rule descriptions."""
+        violations = []
+        for rule in self.password_rules:
+            rtype = rule["type"]
+            if rtype == "min_length":
+                if len(password) < rule["value"]:
+                    violations.append(rule["description"])
+            elif rtype == "regex":
+                if not re.search(rule["value"], password):
+                    violations.append(rule["description"])
+        return violations
+
+    @staticmethod
+    def _password_entropy(password: str) -> float:
+        """Calculate Shannon entropy in bits."""
+        charset_size = 0
+        if re.search(r"[a-z]", password):
+            charset_size += 26
+        if re.search(r"[A-Z]", password):
+            charset_size += 26
+        if re.search(r"[0-9]", password):
+            charset_size += 10
+        if re.search(r"[^a-zA-Z0-9]", password):
+            charset_size += 32
+        if charset_size == 0:
+            return 0.0
+        return len(password) * math.log2(charset_size)
+
+    @staticmethod
+    def _strength_label(entropy: float) -> str:
+        if entropy < 28:
+            return "🔴 Très faible"
+        elif entropy < 36:
+            return "🟠 Faible"
+        elif entropy < 50:
+            return "🟡 Moyen"
+        elif entropy < 65:
+            return "🟢 Fort"
+        else:
+            return "🟢🟢 Très fort"
 
     # ── helpers ──────────────────────────────────────────────────────
 
@@ -75,7 +177,7 @@ class ChatServer:
         return line
 
     def _register(self, sock, addr, buf) -> str | None:
-        """Username negotiation – returns username or None on disconnect."""
+        """Username + password authentication – returns username or None."""
         self._send(sock, {"type": "prompt", "content": "Choose your username: "})
         while True:
             line = self._read_line(sock, buf)
@@ -92,13 +194,97 @@ class ChatServer:
             with self.lock:
                 if name in self.clients:
                     self._send(sock, {"type": "error",
-                                      "content": f"Username '{name}' is already taken. Try again: "})
+                                      "content": f"Username '{name}' is already connected. Try again: "})
+                    continue
+
+            # ── Known user → login ──
+            if name in self.passwords:
+                self._send(sock, {"type": "auth_prompt",
+                                  "content": f"Password for '{name}': "})
+                line = self._read_line(sock, buf)
+                if line is None:
+                    return None
+                try:
+                    pwd = json.loads(line).get("content", "")
+                except json.JSONDecodeError:
+                    continue
+                if not self._verify_password(name, pwd):
+                    self._send(sock, {"type": "error",
+                                      "content": "Wrong password. Try again.\n"})
+                    self._log(f"Failed login attempt for '{name}' from {addr}")
+                    self._send(sock, {"type": "prompt",
+                                      "content": "Choose your username: "})
+                    continue
+                self._log(f"'{name}' authenticated successfully from {addr}")
+
+            # ── New user → register ──
+            else:
+                self._send(sock, {"type": "system",
+                                  "content": f"New user '{name}'. Let's create your password."})
+                pwd = self._new_password_flow(sock, buf)
+                if pwd is None:
+                    return None
+                salt = self._generate_salt()
+                hashed = self._hash_password(pwd, salt)
+                self.passwords[name] = {"salt": salt, "hash": hashed}
+                self._save_passwords()
+                self._log(f"New account created for '{name}' from {addr}")
+
+            # ── Finalize connection ──
+            with self.lock:
+                if name in self.clients:
+                    self._send(sock, {"type": "error",
+                                      "content": f"'{name}' just connected from elsewhere. Try again: "})
                     continue
                 color = self._color_for(name)
                 self.clients[name] = {"socket": sock, "address": addr,
                                       "room": "general", "color": color}
                 self.rooms["general"]["users"].add(name)
             return name
+
+    def _new_password_flow(self, sock, buf) -> str | None:
+        """Guide user through password creation. Returns password or None."""
+        rules_text = "\n".join(f"  • {r['description']}" for r in self.password_rules)
+        self._send(sock, {"type": "system",
+                          "content": f"Password rules:\n{rules_text}"})
+        while True:
+            self._send(sock, {"type": "auth_prompt",
+                              "content": "Choose a password: "})
+            line = self._read_line(sock, buf)
+            if line is None:
+                return None
+            try:
+                pwd = json.loads(line).get("content", "")
+            except json.JSONDecodeError:
+                continue
+
+            violations = self._check_password_rules(pwd)
+            if violations:
+                msg = "Password rejected:\n" + "\n".join(f"  ✗ {v}" for v in violations)
+                self._send(sock, {"type": "error", "content": msg + "\n"})
+                continue
+
+            # Confirmation
+            self._send(sock, {"type": "auth_prompt",
+                              "content": "Confirm password: "})
+            line = self._read_line(sock, buf)
+            if line is None:
+                return None
+            try:
+                confirm = json.loads(line).get("content", "")
+            except json.JSONDecodeError:
+                continue
+
+            if pwd != confirm:
+                self._send(sock, {"type": "error",
+                                  "content": "Passwords do not match. Try again.\n"})
+                continue
+
+            entropy = self._password_entropy(pwd)
+            strength = self._strength_label(entropy)
+            self._send(sock, {"type": "system",
+                              "content": f"Password strength: {strength} ({entropy:.0f} bits)"})
+            return pwd
 
     def handle_client(self, sock, addr):
         buf = [""]
