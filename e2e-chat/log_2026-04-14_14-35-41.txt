@@ -1,0 +1,9 @@
+[2026-04-14 14:35:41] Server listening on port 5555
+[2026-04-14 14:35:52] New connection from ('127.0.0.1', 50944)
+[2026-04-14 14:36:29] New account created for 'nans3' from ('127.0.0.1', 50944)
+[2026-04-14 14:36:29] nans3 connected from ('127.0.0.1', 50944)
+[2026-04-14 14:36:29] nans3 joined room 'general'
+[2026-04-14 14:36:57] User 'nans3' removed from password file
+[2026-04-14 14:36:57] nans3 disconnected
+[2026-04-14 14:36:57] User 'nans3' disconnected due to deletion
+[2026-04-14 14:36:57] nans3 deleted their own account

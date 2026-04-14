@@ -6,6 +6,7 @@ import threading
 import json
 import sys
 import getpass
+import queue
 
 DEFAULT_PORT = 5555
 RESET = "\033[0m"
@@ -23,6 +24,7 @@ class ChatClient:
         self._msg_queue: list[dict] = []
         self._msg_lock = threading.Lock()
         self._msg_ready = threading.Event()
+        self._mid_auth_queue: queue.Queue[dict] = queue.Queue()
 
     # ── network ──────────────────────────────────────────────────────
 
@@ -87,6 +89,10 @@ class ChatClient:
 
         if t == "prompt":
             print(msg["content"], end="", flush=True)
+
+        elif t == "auth_prompt":
+            # In chat mode, route to the main thread for masked input
+            self._mid_auth_queue.put(msg)
 
         elif t == "error":
             print(f"\n\033[91m✗ {msg['content']}\033[0m", flush=True)
@@ -186,6 +192,14 @@ class ChatClient:
                 if text.strip().lower() == "/quit":
                     self.running = False
                     break
+                # If server replies with an auth_prompt (e.g. /deleteaccount),
+                # handle it here in the main thread with hidden input
+                try:
+                    prompt_msg = self._mid_auth_queue.get(timeout=0.8)
+                    pwd = getpass.getpass(prompt_msg["content"])
+                    self._send(pwd)
+                except queue.Empty:
+                    pass
         except (KeyboardInterrupt, EOFError):
             pass
         finally:

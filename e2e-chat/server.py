@@ -73,6 +73,34 @@ class ChatServer:
             for user, data in self.passwords.items():
                 f.write(f"{user}:{data['salt']}:{data['hash']}\n")
 
+    def delete_user(self, username: str, notify: bool = True) -> bool:
+        """Delete a user account (remove from password file, disconnect if online).
+
+        If notify=True (admin deletion), send a system message to the client.
+        If notify=False (self-deletion), the caller already sent a quit message.
+        """
+        # Step 1: remove from password store (lock held briefly)
+        with self.lock:
+            existed = username in self.passwords
+            if not existed:
+                return False
+            self.passwords.pop(username, None)
+            self._save_passwords()
+            self._log(f"User '{username}' removed from password file")
+            sock = self.clients.get(username, {}).get("socket") if username in self.clients else None
+
+        # Step 2: notify and disconnect (lock released to avoid deadlock)
+        if sock and notify:
+            try:
+                self._send(sock, {"type": "system",
+                                  "content": "Your account has been deleted by admin. Disconnecting."})
+            except OSError:
+                pass
+        if sock:
+            self._disconnect(username)
+            self._log(f"User '{username}' disconnected due to deletion")
+        return True
+
     def _verify_password(self, username: str, password: str) -> bool:
         """Constant-time password comparison."""
         data = self.passwords.get(username)
@@ -311,7 +339,7 @@ class ChatServer:
                     content = json.loads(line).get("content", "")
                 except json.JSONDecodeError:
                     continue
-                self._process(username, content)
+                self._process(username, content, buf)
         except (ConnectionResetError, BrokenPipeError, OSError):
             pass
         finally:
@@ -320,9 +348,9 @@ class ChatServer:
 
     # ── message processing ───────────────────────────────────────────
 
-    def _process(self, username: str, content: str):
+    def _process(self, username: str, content: str, buf: list[str]):
         if content.startswith("/"):
-            self._command(username, content)
+            self._command(username, content, buf)
         else:
             with self.lock:
                 info = self.clients.get(username)
@@ -335,7 +363,7 @@ class ChatServer:
             })
             self._log(f"[{info['room']}] {username}: {content}")
 
-    def _command(self, username: str, text: str):
+    def _command(self, username: str, text: str, buf: list[str]):
         parts = text.split()
         cmd = parts[0].lower()
         sock = self.clients[username]["socket"]
@@ -343,12 +371,13 @@ class ChatServer:
         if cmd == "/help":
             self._send(sock, {"type": "system", "content":
                 "Commands:\n"
-                "  /rooms                      – List all rooms\n"
-                "  /create <name> [password]    – Create a room\n"
-                "  /join <name> [password]      – Join a room\n"
-                "  /leave                       – Back to general\n"
-                "  /who                         – Users in current room\n"
-                "  /quit                        – Disconnect"})
+                "  /rooms                       – List all rooms\n"
+                "  /create <name> [password]     – Create a room\n"
+                "  /join <name> [password]       – Join a room\n"
+                "  /leave                        – Back to general\n"
+                "  /who                          – Users in current room\n"
+                "  /quit                         – Disconnect\n"
+                "  /deleteaccount                – Delete your account"})
 
         elif cmd == "/rooms":
             with self.lock:
@@ -440,6 +469,24 @@ class ChatServer:
             self._send(sock, {"type": "quit", "content": "Goodbye!"})
             self._disconnect(username)
 
+        elif cmd == "/deleteaccount":
+            self._send(sock, {"type": "auth_prompt",
+                              "content": "Confirm your password to delete your account: "})
+            line = self._read_line(sock, buf)
+            try:
+                pwd = json.loads(line).get("content", "") if line else ""
+            except json.JSONDecodeError:
+                pwd = ""
+            if not self._verify_password(username, pwd):
+                self._send(sock, {"type": "error",
+                                  "content": "Wrong password. Account not deleted."})
+                self._log(f"{username} failed to delete account (wrong password)")
+                return
+            self._send(sock, {"type": "quit",
+                              "content": "Your account has been deleted. Goodbye!"})
+            self.delete_user(username, notify=False)
+            self._log(f"{username} deleted their own account")
+
         else:
             self._send(sock, {"type": "error",
                               "content": f"Unknown command: {cmd}. Type /help."})
@@ -480,6 +527,41 @@ class ChatServer:
             self.log_file.close()
 
 
+def delete_user_file(username: str) -> bool:
+    """Delete a user from the password file without running the server.
+
+    Returns True if a user was removed, False if not found.
+    """
+    if not os.path.exists(PASSWORD_FILE):
+        return False
+    changed = False
+    lines = []
+    with open(PASSWORD_FILE, "r", encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            parts = line.rstrip("\n").split(":", 2)
+            if parts[0] == username:
+                changed = True
+                continue
+            lines.append(line)
+    if changed:
+        with open(PASSWORD_FILE, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+    return changed
+
+
 if __name__ == "__main__":
+    # CLI: support deleting a user: python server.py --delete-user username
+    if len(sys.argv) >= 3 and sys.argv[1] in ("--delete-user", "-d"):
+        user = sys.argv[2]
+        ok = delete_user_file(user)
+        if ok:
+            print(f"User '{user}' deleted from {PASSWORD_FILE}.")
+            sys.exit(0)
+        else:
+            print(f"User '{user}' not found in {PASSWORD_FILE}.")
+            sys.exit(1)
+
     port = int(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_PORT
     ChatServer(port).start()
