@@ -1,0 +1,4 @@
+2026-04-14 11:17:10,778 SERVER_STARTED port=12347
+2026-04-14 11:17:12,233 CONNECT alice ('127.0.0.1', 42860)
+2026-04-14 11:17:12,735 MSG general alice: Hello from Alice
+2026-04-14 11:17:14,137 ROOM_CREATE secretroom by alice pwd=YES
