@@ -102,6 +102,8 @@ class ChatClient:
                 text = input()
                 if not self.running:
                     break
+                # Erase the typed line so only the server echo is shown
+                print("\033[A\033[2K", end="", flush=True)
                 self._send(text)
                 if text.strip().lower() == "/quit":
                     self.running = False

@@ -1,0 +1,27 @@
+[2026-04-14 13:06:37] Server listening on port 5555
+[2026-04-14 13:06:42] New connection from ('127.0.0.1', 41082)
+[2026-04-14 13:06:46] New connection from ('127.0.0.1', 41098)
+[2026-04-14 13:06:49] nans2 connected from ('127.0.0.1', 41098)
+[2026-04-14 13:06:49] nans2 joined room 'general'
+[2026-04-14 13:06:52] nans connected from ('127.0.0.1', 41082)
+[2026-04-14 13:06:52] nans joined room 'general'
+[2026-04-14 13:06:57] [general] nans: test
+[2026-04-14 13:07:02] [general] nans2: echo
+[2026-04-14 13:07:23] nans created room 'chocopain'
+[2026-04-14 13:07:35] nans2 moved from 'general' to 'chocopain'
+[2026-04-14 13:07:42] nans moved from 'general' to 'chocopain'
+[2026-04-14 13:08:22] [chocopain] nans: test
+[2026-04-14 13:08:26] [chocopain] nans2: test
+[2026-04-14 13:10:08] nans2 left 'chocopain' → 'general'
+[2026-04-14 13:10:18] nans2 disconnected
+[2026-04-14 13:10:20] New connection from ('127.0.0.1', 38824)
+[2026-04-14 13:10:23] nans2 connected from ('127.0.0.1', 38824)
+[2026-04-14 13:10:23] nans2 joined room 'general'
+[2026-04-14 13:10:28] nans2 moved from 'general' to 'chocopain'
+[2026-04-14 13:10:29] [chocopain] nans2: re
+[2026-04-14 13:16:37] nans left 'chocopain' → 'general'
+[2026-04-14 13:16:53] nans created room 'tu-ne-me-vois-pas' (password-protected)
+[2026-04-14 13:17:06] nans2 left 'chocopain' → 'general'
+[2026-04-14 13:17:21] nans2 failed to join 'tu-ne-me-vois-pas' (wrong password)
+[2026-04-14 13:17:39] nans2 moved from 'general' to 'tu-ne-me-vois-pas'
+[2026-04-14 13:17:46] [tu-ne-me-vois-pas] nans2: incroyable
