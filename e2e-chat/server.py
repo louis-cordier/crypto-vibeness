@@ -42,6 +42,7 @@ class ChatServer:
 
         self.passwords = self._load_passwords()
         self.session_keys: dict[str, bytes] = {}
+        self.public_keys: dict[str, dict] = {}   # username -> {"n": "0x...", "e": 65537}
         self.password_rules = self._load_rules()
 
     # ── password storage ─────────────────────────────────────────────
@@ -89,6 +90,8 @@ class ChatServer:
             if data.get("type") != "kem_pubkey":
                 return None
             public_key = kem.pubkey_from_dict(data)
+            # Store public key in directory for E2EE
+            self.public_keys[name] = kem.pubkey_to_dict(public_key)
         except (json.JSONDecodeError, KeyError, ValueError):
             return None
 
@@ -187,6 +190,51 @@ class ChatServer:
             return "🟢 Fort"
         else:
             return "🟢🟢 Très fort"
+
+    # ── E2EE relay (DMs, pubkey directory) ──────────────────────────────
+
+    def _handle_e2ee(self, username: str, raw: dict):
+        """Handle E2EE message types: pubkey requests, DM key exchange, DMs."""
+        t = raw.get("type")
+        sock = self.clients[username]["socket"]
+
+        if t == "get_pubkey":
+            target = raw.get("target", "")
+            with self.lock:
+                pubkey = self.public_keys.get(target)
+                online = target in self.clients
+            if pubkey and online:
+                self._send(sock, {"type": "pubkey_response",
+                                  "username": target, **pubkey})
+            else:
+                self._send(sock, {"type": "error",
+                                  "content": f"User '{target}' is not online."})
+
+        elif t == "dm_key_exchange":
+            target = raw.get("to", "")
+            with self.lock:
+                info = self.clients.get(target)
+            if info:
+                fwd = {k: v for k, v in raw.items() if k != "to"}
+                fwd["from"] = username
+                self._send(info["socket"], fwd)
+                self._log(f"DM key exchange: {username} → {target}")
+            else:
+                self._send(sock, {"type": "error",
+                                  "content": f"User '{target}' is not online."})
+
+        elif t == "dm":
+            target = raw.get("to", "")
+            with self.lock:
+                info = self.clients.get(target)
+            if info:
+                fwd = {k: v for k, v in raw.items() if k != "to"}
+                fwd["from"] = username
+                self._send(info["socket"], fwd)
+                self._log(f"DM (E2EE): {username} → {target}")
+            else:
+                self._send(sock, {"type": "error",
+                                  "content": f"User '{target}' is not online."})
 
     # ── helpers ──────────────────────────────────────────────────────
 
@@ -374,9 +422,15 @@ class ChatServer:
                     break
                 try:
                     raw = json.loads(line)
+                    raw_type = raw.get("type")
                     content = raw.get("content", "")
                     encrypted = raw.get("encrypted", False)
+                    signature = raw.get("signature")
                 except json.JSONDecodeError:
+                    continue
+                # E2EE messages: relay as opaque blobs
+                if raw_type in ("get_pubkey", "dm_key_exchange", "dm"):
+                    self._handle_e2ee(username, raw)
                     continue
                 # Decrypt if encrypted
                 if encrypted:
@@ -388,7 +442,7 @@ class ChatServer:
                             self._send(sock, {"type": "error",
                                               "content": "Decryption failed."})
                             continue
-                self._process(username, content, buf)
+                self._process(username, content, buf, signature=signature)
         except (ConnectionResetError, BrokenPipeError, OSError):
             pass
         finally:
@@ -397,7 +451,8 @@ class ChatServer:
 
     # ── message processing ───────────────────────────────────────────
 
-    def _process(self, username: str, content: str, buf: list[str]):
+    def _process(self, username: str, content: str, buf: list[str],
+                 *, signature: str | None = None):
         if content.startswith("/"):
             self._command(username, content, buf)
         else:
@@ -406,12 +461,12 @@ class ChatServer:
             if not info:
                 return
             ts = datetime.datetime.now().strftime("%H:%M:%S")
-            # Build base message (plaintext for logging)
             base_msg = {
                 "type": "message", "username": username,
                 "content": content, "timestamp": ts, "color": info["color"],
             }
-            # Send to each user in the room, encrypting per-recipient
+            if signature:
+                base_msg["signature"] = signature
             self._broadcast_encrypted(info["room"], base_msg)
             self._log(f"[{info['room']}] {username}: {content}")
 
@@ -421,6 +476,8 @@ class ChatServer:
         with self.lock:
             users = list(self.rooms.get(room, {}).get("users", []))
         plaintext = data.get("content", "")
+        sender = data.get("username", "")
+        sender_pubkey = self.public_keys.get(sender)
         for u in users:
             if u == exclude:
                 continue
@@ -433,6 +490,8 @@ class ChatServer:
                 msg = dict(data)
                 msg["content"] = tea_cipher.encrypt_b64(plaintext, recipient_key)
                 msg["encrypted"] = True
+                if sender_pubkey:
+                    msg["sender_pubkey"] = sender_pubkey
                 self._send(info["socket"], msg)
             else:
                 self._send(info["socket"], data)
@@ -450,6 +509,7 @@ class ChatServer:
                 "  /join <name> [password]       – Join a room\n"
                 "  /leave                        – Back to general\n"
                 "  /who                          – Users in current room\n"
+                "  /dm <user> <message>          – Encrypted direct message\n"
                 "  /quit                         – Disconnect\n"
                 "  /deleteaccount                – Delete your account"})
 
@@ -571,6 +631,7 @@ class ChatServer:
         with self.lock:
             info = self.clients.pop(username, None)
             self.session_keys.pop(username, None)
+            self.public_keys.pop(username, None)
             if info is None:
                 return
             room = info["room"]

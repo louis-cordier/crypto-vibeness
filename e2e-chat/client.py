@@ -9,6 +9,7 @@ import getpass
 import queue
 import os
 import base64
+import datetime
 import tea_cipher
 import kem
 
@@ -30,6 +31,13 @@ class ChatClient:
         self._msg_ready = threading.Event()
         self._mid_auth_queue: queue.Queue[dict] = queue.Queue()
         self._encryption_key: bytes | None = None
+        self._rsa_pub: tuple[int, int] | None = None
+        self._rsa_priv: tuple[int, int] | None = None
+        # E2EE state for DMs
+        self._peer_keys: dict[str, bytes] = {}       # peer -> session key
+        self._peer_pubkeys: dict[str, tuple] = {}    # peer -> RSA pubkey
+        self._pubkey_response: dict | None = None
+        self._pubkey_event = threading.Event()
 
     # ── network ──────────────────────────────────────────────────────
 
@@ -40,8 +48,12 @@ class ChatClient:
 
     def _send(self, content: str):
         if self._encryption_key and not content.startswith("/"):
+            # Sign the plaintext
+            sig = kem.rsa_sign(content.encode("utf-8"), self._rsa_priv)
+            sig_b64 = base64.b64encode(sig).decode()
             encrypted = tea_cipher.encrypt_b64(content, self._encryption_key)
-            msg = json.dumps({"content": encrypted, "encrypted": True}) + "\n"
+            msg = json.dumps({"content": encrypted, "encrypted": True,
+                              "signature": sig_b64}) + "\n"
         else:
             msg = json.dumps({"content": content}) + "\n"
         self.sock.sendall(msg.encode("utf-8"))
@@ -105,7 +117,6 @@ class ChatClient:
             print(msg["content"], end="", flush=True)
 
         elif t == "auth_prompt":
-            # In chat mode, route to the main thread for masked input
             self._mid_auth_queue.put(msg)
 
         elif t == "error":
@@ -120,12 +131,26 @@ class ChatClient:
             ts = msg.get("timestamp", "")
             user = msg.get("username", "")
             body = msg.get("content", "")
-            # Decrypt if encrypted
             if msg.get("encrypted") and self._encryption_key:
                 try:
                     body = tea_cipher.decrypt_b64(body, self._encryption_key)
                 except Exception:
                     body = "[decryption failed]"
+            # Verify signature if present
+            sig_b64 = msg.get("signature")
+            sender_pk = msg.get("sender_pubkey")
+            if sig_b64 and sender_pk:
+                try:
+                    sig = base64.b64decode(sig_b64)
+                    pubkey = kem.pubkey_from_dict(sender_pk)
+                    if not kem.rsa_verify(body.encode("utf-8"), sig, pubkey):
+                        print(f"\r\033[91m⚠️  SECURITY ALERT: Message from "
+                              f"{user} has INVALID signature!\033[0m")
+                        return
+                except Exception:
+                    print(f"\r\033[91m⚠️  SECURITY ALERT: Could not verify "
+                          f"signature from {user}!\033[0m")
+                    return
             print(f"\r[{ts}] {color}{user}{RESET}: {body}")
 
         elif t == "system":
@@ -145,6 +170,134 @@ class ChatClient:
         elif t == "quit":
             print(f"\033[93m{msg['content']}\033[0m")
             self.running = False
+
+        # ── E2EE DM types ──
+        elif t == "pubkey_response":
+            self._pubkey_response = msg
+            self._pubkey_event.set()
+
+        elif t == "dm_key_exchange":
+            sender = msg.get("from", "")
+            try:
+                encrypted_key = base64.b64decode(msg["encrypted_key"])
+                session_key = kem.rsa_decrypt(encrypted_key, self._rsa_priv)
+                self._peer_keys[sender] = session_key
+                sender_pk = msg.get("sender_pubkey")
+                if sender_pk:
+                    self._peer_pubkeys[sender] = kem.pubkey_from_dict(sender_pk)
+                print(f"\r\033[93m🔑 Secure DM channel established "
+                      f"with {sender}.\033[0m")
+            except Exception:
+                print(f"\r\033[91m✗ Failed to establish DM channel "
+                      f"with {sender}.\033[0m")
+
+        elif t == "dm":
+            self._display_dm(msg)
+
+    def _display_dm(self, msg: dict):
+        """Handle an incoming E2EE direct message."""
+        sender = msg.get("from", "")
+        content = msg.get("content", "")
+        sig_b64 = msg.get("signature", "")
+
+        # Verify signature
+        peer_pubkey = self._peer_pubkeys.get(sender)
+        if sig_b64 and peer_pubkey:
+            try:
+                sig = base64.b64decode(sig_b64)
+                if not kem.rsa_verify(content.encode("utf-8"), sig, peer_pubkey):
+                    print(f"\r\033[91m⚠️  SECURITY ALERT: DM from {sender} "
+                          f"has INVALID signature! Message may have been "
+                          f"tampered with.\033[0m")
+                    return
+            except Exception:
+                print(f"\r\033[91m⚠️  SECURITY ALERT: Could not verify "
+                      f"DM signature from {sender}!\033[0m")
+                return
+        elif sig_b64 and not peer_pubkey:
+            print(f"\r\033[91m⚠️  SECURITY ALERT: Cannot verify DM from "
+                  f"{sender} — no public key available.\033[0m")
+
+        # Decrypt
+        peer_key = self._peer_keys.get(sender)
+        if peer_key:
+            try:
+                plaintext = tea_cipher.decrypt_b64(content, peer_key)
+            except Exception:
+                print(f"\r\033[91m⚠️  SECURITY ALERT: Could not decrypt "
+                      f"DM from {sender}.\033[0m")
+                return
+            ts = datetime.datetime.now().strftime("%H:%M:%S")
+            print(f"\r[{ts}] \033[35m[DM ← {sender}]\033[0m: {plaintext}")
+        else:
+            print(f"\r\033[91m✗ DM from {sender}: no session key "
+                  f"available.\033[0m")
+
+    # ── DM handling ──────────────────────────────────────────────────
+
+    def _establish_dm_key(self, target: str) -> bool:
+        """Request peer's pubkey and establish a DM session key."""
+        self._pubkey_response = None
+        self._pubkey_event.clear()
+        self._send_raw({"type": "get_pubkey", "target": target})
+        self._pubkey_event.wait(timeout=5)
+
+        if self._pubkey_response is None:
+            return False
+
+        try:
+            peer_pubkey = kem.pubkey_from_dict(self._pubkey_response)
+            self._peer_pubkeys[target] = peer_pubkey
+        except (KeyError, ValueError):
+            return False
+
+        session_key = os.urandom(16)
+        ct = kem.rsa_encrypt(session_key, peer_pubkey)
+        self._send_raw({
+            "type": "dm_key_exchange",
+            "to": target,
+            "encrypted_key": base64.b64encode(ct).decode(),
+            "sender_pubkey": kem.pubkey_to_dict(self._rsa_pub),
+        })
+        self._peer_keys[target] = session_key
+        print(f"\033[93m🔑 Secure DM channel established with "
+              f"{target}.\033[0m")
+        return True
+
+    def _handle_dm(self, text: str):
+        """Process /dm <user> <message>."""
+        parts = text.split(None, 2)
+        if len(parts) < 3:
+            print("\033[91m✗ Usage: /dm <username> <message>\033[0m")
+            return
+        target = parts[1]
+        message = parts[2]
+
+        if target == self.username:
+            print("\033[91m✗ Cannot DM yourself.\033[0m")
+            return
+
+        # Establish session key if needed
+        if target not in self._peer_keys:
+            if not self._establish_dm_key(target):
+                print(f"\033[91m✗ Could not establish secure channel "
+                      f"with {target}.\033[0m")
+                return
+
+        # Encrypt with peer session key
+        encrypted = tea_cipher.encrypt_b64(message, self._peer_keys[target])
+        # Sign the ciphertext
+        sig = kem.rsa_sign(encrypted.encode("utf-8"), self._rsa_priv)
+        sig_b64 = base64.b64encode(sig).decode()
+
+        self._send_raw({
+            "type": "dm",
+            "to": target,
+            "content": encrypted,
+            "signature": sig_b64,
+        })
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        print(f"[{ts}] \033[35m[DM → {target}]\033[0m: {message}")
 
     # ── RSA key management ──────────────────────────────────────────────
 
@@ -246,10 +399,14 @@ class ChatClient:
                     break
                 # Erase the typed line so only the server echo is shown
                 print("\033[A\033[2K", end="", flush=True)
-                self._send(text)
-                if text.strip().lower() == "/quit":
+                if text.strip().lower().startswith("/dm "):
+                    self._handle_dm(text.strip())
+                elif text.strip().lower() == "/quit":
+                    self._send(text)
                     self.running = False
                     break
+                else:
+                    self._send(text)
                 # If server replies with an auth_prompt (e.g. /deleteaccount),
                 # handle it here in the main thread with hidden input
                 try:

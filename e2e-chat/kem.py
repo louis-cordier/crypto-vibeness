@@ -10,6 +10,8 @@
 import os
 import json
 import base64
+import hashlib
+import hmac as _hmac
 
 # ── Miller-Rabin primality test ─────────────────────────────────────
 
@@ -120,6 +122,54 @@ def rsa_decrypt(ciphertext: bytes, private_key: tuple[int, int]) -> bytes:
     return _pkcs1_unpad(padded)
 
 
+# ── PKCS#1 v1.5 type 1 padding (signing) ────────────────────────────
+
+def _pkcs1_sign_pad(digest: bytes, key_size: int) -> bytes:
+    pad_len = key_size - len(digest) - 3
+    if pad_len < 8:
+        raise ValueError("Key too short for signing")
+    return b"\x00\x01" + b"\xff" * pad_len + b"\x00" + digest
+
+
+def _pkcs1_sign_unpad(padded: bytes) -> bytes:
+    if len(padded) < 11 or padded[0:2] != b"\x00\x01":
+        raise ValueError("Invalid signature padding")
+    idx = 2
+    while idx < len(padded) and padded[idx] == 0xFF:
+        idx += 1
+    if idx >= len(padded) or padded[idx] != 0x00:
+        raise ValueError("Invalid signature padding")
+    return padded[idx + 1:]
+
+
+# ── RSA sign / verify ──────────────────────────────────────────────
+
+def rsa_sign(message: bytes, private_key: tuple[int, int]) -> bytes:
+    """Sign message with RSA private key (SHA-256 + PKCS#1 v1.5 type 1)."""
+    n, d = private_key
+    key_size = (n.bit_length() + 7) // 8
+    digest = hashlib.sha256(message).digest()
+    padded = _pkcs1_sign_pad(digest, key_size)
+    m = int.from_bytes(padded, "big")
+    s = pow(m, d, n)
+    return s.to_bytes(key_size, "big")
+
+
+def rsa_verify(message: bytes, signature: bytes, public_key: tuple[int, int]) -> bool:
+    """Verify RSA signature (SHA-256 + PKCS#1 v1.5 type 1)."""
+    n, e = public_key
+    key_size = (n.bit_length() + 7) // 8
+    s = int.from_bytes(signature, "big")
+    m = pow(s, e, n)
+    padded = m.to_bytes(key_size, "big")
+    try:
+        digest = _pkcs1_sign_unpad(padded)
+    except ValueError:
+        return False
+    expected = hashlib.sha256(message).digest()
+    return _hmac.compare_digest(digest, expected)
+
+
 # ── KEM (Key Encapsulation Mechanism) ───────────────────────────────
 
 def encapsulate(public_key: tuple[int, int]) -> tuple[bytes, bytes]:
@@ -137,13 +187,13 @@ def decapsulate(ciphertext: bytes, private_key: tuple[int, int]) -> bytes:
 
 # ── Key file I/O (.pub / .priv as JSON) ────────────────────────────
 
-def save_public_key(filepath: str, public_key: tuple[int, int]):
+def save_public_key(public_key: tuple[int, int], filepath: str):
     n, e = public_key
     with open(filepath, "w", encoding="utf-8") as f:
         json.dump({"n": hex(n), "e": e}, f)
 
 
-def save_private_key(filepath: str, private_key: tuple[int, int]):
+def save_private_key(private_key: tuple[int, int], filepath: str):
     n, d = private_key
     with open(filepath, "w", encoding="utf-8") as f:
         json.dump({"n": hex(n), "d": hex(d)}, f)
@@ -208,8 +258,8 @@ if __name__ == "__main__":
     print(f"✅ KEM: session key = {session_key.hex()}")
 
     # Test file I/O
-    save_public_key("/tmp/test_kem.pub", pub)
-    save_private_key("/tmp/test_kem.priv", priv)
+    save_public_key(pub, "/tmp/test_kem.pub")
+    save_private_key(priv, "/tmp/test_kem.priv")
     pub2 = load_public_key("/tmp/test_kem.pub")
     priv2 = load_private_key("/tmp/test_kem.priv")
     assert pub2 == pub and priv2 == priv
@@ -221,5 +271,21 @@ if __name__ == "__main__":
     d = pubkey_to_dict(pub)
     assert pubkey_from_dict(d) == pub
     print("✅ pubkey_to_dict / pubkey_from_dict")
+
+    # Test signing
+    msg = b"Hello, signed world!"
+    sig = rsa_sign(msg, priv)
+    assert rsa_verify(msg, sig, pub)
+    print("✅ RSA sign/verify")
+
+    # Test tampered message
+    assert not rsa_verify(b"Tampered!", sig, pub)
+    print("✅ Tamper detection (modified message)")
+
+    # Test tampered signature
+    bad_sig = bytearray(sig)
+    bad_sig[-1] ^= 0xFF
+    assert not rsa_verify(msg, bytes(bad_sig), pub)
+    print("✅ Tamper detection (modified signature)")
 
     print("\n🎉 All KEM tests passed!")
