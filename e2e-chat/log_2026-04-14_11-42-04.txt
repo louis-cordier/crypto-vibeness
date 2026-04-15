@@ -1,0 +1,6 @@
+[2026-04-14 11:42:04] Server listening on port 5555
+[2026-04-14 11:42:21] New connection from ('127.0.0.1', 55482)
+[2026-04-14 11:42:23] Louis connected from ('127.0.0.1', 55482)
+[2026-04-14 11:42:23] Louis joined room 'general'
+[2026-04-14 11:42:35] Louis disconnected
+[2026-04-14 11:49:18] Server shutting down

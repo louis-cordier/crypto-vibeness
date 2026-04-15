@@ -1,0 +1,18 @@
+# Hacker message hash and hashcat command
+# Hash: 35b95f7c0f63631c453220fb2a86f218
+
+# Exact hashcat command to run (recommended):
+# 1) Save the hash into a file, e.g. target_hash.txt
+#    echo "35b95f7c0f63631c453220fb2a86f218" > target_hash.txt
+# 2) Run hashcat (mode 0 = MD5, -a 3 = brute-force) with the given mask
+#    hashcat -m 0 -a 3 target_hash.txt ?u?u?l?l?u?u?s --status --status-timer=10 --outfile=md5_decrypted.txt --outfile-format=2
+# Notes:
+# - ?u = upper, ?l = lower, ?s = special
+# - outfile-format=2 prints "hash:plain" (use other formats if you prefer)
+# - Running this requires hashcat installed and a capable GPU/CPU; this environment may not have hashcat.
+
+# If you run the command above, the output file md5_decrypted.txt will contain the cracked plaintext in the format:
+# 35b95f7c0f63631c453220fb2a86f218:PLAINTEXT
+
+# Placeholder: no crack performed here. Replace the following line after running hashcat locally.
+35b95f7c0f63631c453220fb2a86f218:
