@@ -1,0 +1,26 @@
+[2026-04-15 14:25:39] Server listening on port 5555
+[2026-04-15 14:25:45] New connection from ('127.0.0.1', 51922)
+[2026-04-15 14:25:55] 'nans' authenticated successfully from ('127.0.0.1', 51922)
+[2026-04-15 14:25:55] KEM handshake completed for 'nans'
+[2026-04-15 14:25:55] nans connected from ('127.0.0.1', 51922)
+[2026-04-15 14:25:55] nans joined room 'general'
+[2026-04-15 14:26:23] nans created room 'salon-libre'
+[2026-04-15 14:26:36] nans created room 'salon-privé' (password-protected)
+[2026-04-15 14:26:55] New connection from ('127.0.0.1', 55128)
+[2026-04-15 14:27:04] 'nans2' authenticated successfully from ('127.0.0.1', 55128)
+[2026-04-15 14:27:04] KEM handshake completed for 'nans2'
+[2026-04-15 14:27:04] nans2 connected from ('127.0.0.1', 55128)
+[2026-04-15 14:27:04] nans2 joined room 'general'
+[2026-04-15 14:27:12] New connection from ('127.0.0.1', 51122)
+[2026-04-15 14:27:23] New connection from ('127.0.0.1', 44194)
+[2026-04-15 14:27:33] 'Trajan' authenticated successfully from ('127.0.0.1', 44194)
+[2026-04-15 14:27:33] KEM handshake completed for 'Trajan'
+[2026-04-15 14:27:33] Trajan connected from ('127.0.0.1', 44194)
+[2026-04-15 14:27:33] Trajan joined room 'general'
+[2026-04-15 14:27:53] nans moved from 'general' to 'salon-libre'
+[2026-04-15 14:27:59] nans failed to join 'salon-privé' (wrong password)
+[2026-04-15 14:28:13] nans failed to join 'salon-privé' (wrong password)
+[2026-04-15 14:28:41] nans moved from 'salon-libre' to 'salon-privé'
+[2026-04-15 14:36:02] DM key exchange: Trajan → nans
+[2026-04-15 14:36:02] DM (E2EE): Trajan → nans
+[2026-04-15 14:46:46] nans2 moved from 'general' to 'salon-libre'

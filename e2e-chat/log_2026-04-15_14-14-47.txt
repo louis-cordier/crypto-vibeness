@@ -1,0 +1,28 @@
+[2026-04-15 14:14:47] Server listening on port 5555
+[2026-04-15 14:14:52] New connection from ('127.0.0.1', 41978)
+[2026-04-15 14:14:57] New connection from ('127.0.0.1', 43776)
+[2026-04-15 14:15:47] New account created for 'nans' from ('127.0.0.1', 41978)
+[2026-04-15 14:15:47] KEM handshake completed for 'nans'
+[2026-04-15 14:15:47] nans connected from ('127.0.0.1', 41978)
+[2026-04-15 14:15:47] nans joined room 'general'
+[2026-04-15 14:16:10] New account created for 'nans2' from ('127.0.0.1', 43776)
+[2026-04-15 14:16:10] KEM handshake completed for 'nans2'
+[2026-04-15 14:16:10] nans2 connected from ('127.0.0.1', 43776)
+[2026-04-15 14:16:10] nans2 joined room 'general'
+[2026-04-15 14:17:13] [general] nans: test
+[2026-04-15 14:17:16] [general] nans2: test
+[2026-04-15 14:20:54] DM key exchange: nans2 → nans
+[2026-04-15 14:20:54] DM (E2EE): nans2 → nans
+[2026-04-15 14:21:14] New connection from ('127.0.0.1', 52950)
+[2026-04-15 14:21:34] New account created for 'Trajan' from ('127.0.0.1', 52950)
+[2026-04-15 14:21:35] KEM handshake completed for 'Trajan'
+[2026-04-15 14:21:35] Trajan connected from ('127.0.0.1', 52950)
+[2026-04-15 14:21:35] Trajan joined room 'general'
+[2026-04-15 14:21:44] [general] Trajan: test
+[2026-04-15 14:22:01] DM (E2EE): nans2 → nans
+[2026-04-15 14:23:02] nans2 created room 'sale' (password-protected)
+[2026-04-15 14:23:26] nans2 created room 'sale-libre'
+[2026-04-15 14:23:34] nans2 created room 'sale-privé'
+[2026-04-15 14:25:29] nans disconnected
+[2026-04-15 14:25:32] New connection from ('127.0.0.1', 42352)
+[2026-04-15 14:25:37] Server shutting down
