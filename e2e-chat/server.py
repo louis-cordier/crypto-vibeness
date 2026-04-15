@@ -13,9 +13,11 @@ import math
 import re
 import os
 import string
+import tea_cipher
 
 DEFAULT_PORT = 5555
 PASSWORD_FILE = "this_is_safe.txt"
+KEYS_FILE = "user_keys_do_not_steal_plz.txt"
 RULES_FILE = "password_rules.json"
 
 COLORS = [
@@ -39,6 +41,7 @@ class ChatServer:
         self.log_file = open(log_filename, "a", encoding="utf-8")
 
         self.passwords = self._load_passwords()
+        self.user_keys = self._load_keys()
         self.password_rules = self._load_rules()
 
     # ── password storage ─────────────────────────────────────────────
@@ -73,6 +76,34 @@ class ChatServer:
             for user, data in self.passwords.items():
                 f.write(f"{user}:{data['salt']}:{data['hash']}\n")
 
+    # ── encryption key storage ───────────────────────────────────────
+
+    def _load_keys(self) -> dict[str, dict]:
+        """Load username:{salt, key} from user_keys_do_not_steal_plz.txt."""
+        keys = {}
+        if os.path.exists(KEYS_FILE):
+            with open(KEYS_FILE, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if ":" in line:
+                        parts = line.split(":", 2)
+                        if len(parts) == 3:
+                            user, salt_b64, key_b64 = parts
+                            keys[user] = {"salt": salt_b64, "key": key_b64}
+        return keys
+
+    def _save_keys(self):
+        with open(KEYS_FILE, "w", encoding="utf-8") as f:
+            for user, data in self.user_keys.items():
+                f.write(f"{user}:{data['salt']}:{data['key']}\n")
+
+    def _get_user_key(self, username: str) -> bytes | None:
+        """Return the raw 128-bit encryption key for a user, or None."""
+        data = self.user_keys.get(username)
+        if data:
+            return tea_cipher.key_from_b64(data["key"])
+        return None
+
     def delete_user(self, username: str, notify: bool = True) -> bool:
         """Delete a user account (remove from password file, disconnect if online).
 
@@ -86,6 +117,8 @@ class ChatServer:
                 return False
             self.passwords.pop(username, None)
             self._save_passwords()
+            self.user_keys.pop(username, None)
+            self._save_keys()
             self._log(f"User '{username}' removed from password file")
             sock = self.clients.get(username, {}).get("socket") if username in self.clients else None
 
@@ -244,6 +277,11 @@ class ChatServer:
                                       "content": "Choose your username: "})
                     continue
                 self._log(f"'{name}' authenticated successfully from {addr}")
+                # Send encryption key to client
+                user_key = self.user_keys.get(name)
+                if user_key:
+                    self._send(sock, {"type": "encryption_key",
+                                      "key": user_key["key"]})
 
             # ── New user → register ──
             else:
@@ -256,6 +294,21 @@ class ChatServer:
                 hashed = self._hash_password(pwd, salt)
                 self.passwords[name] = {"salt": salt, "hash": hashed}
                 self._save_passwords()
+
+                # ── Encryption key from user secret ──
+                secret = self._ask_encryption_secret(sock, buf)
+                if secret is None:
+                    return None
+                key_salt = tea_cipher.generate_salt()
+                key = tea_cipher.derive_key(secret, key_salt)
+                self.user_keys[name] = {
+                    "salt": tea_cipher.key_to_b64(key_salt),
+                    "key": tea_cipher.key_to_b64(key),
+                }
+                self._save_keys()
+                # Send key to client so it can store it locally
+                self._send(sock, {"type": "encryption_key",
+                                  "key": tea_cipher.key_to_b64(key)})
                 self._log(f"New account created for '{name}' from {addr}")
 
             # ── Finalize connection ──
@@ -314,6 +367,23 @@ class ChatServer:
                               "content": f"Password strength: {strength} ({entropy:.0f} bits)"})
             return pwd
 
+    def _ask_encryption_secret(self, sock, buf) -> str | None:
+        """Ask the user for a secret to derive their encryption key."""
+        self._send(sock, {"type": "system",
+                          "content": "Now choose a secret to generate your encryption key."})
+        self._send(sock, {"type": "auth_prompt",
+                          "content": "Encryption secret: "})
+        line = self._read_line(sock, buf)
+        if line is None:
+            return None
+        try:
+            secret = json.loads(line).get("content", "")
+        except json.JSONDecodeError:
+            return None
+        if not secret:
+            return None
+        return secret
+
     def handle_client(self, sock, addr):
         buf = [""]
         username = None
@@ -336,9 +406,21 @@ class ChatServer:
                 if line is None:
                     break
                 try:
-                    content = json.loads(line).get("content", "")
+                    raw = json.loads(line)
+                    content = raw.get("content", "")
+                    encrypted = raw.get("encrypted", False)
                 except json.JSONDecodeError:
                     continue
+                # Decrypt if encrypted
+                if encrypted:
+                    sender_key = self._get_user_key(username)
+                    if sender_key:
+                        try:
+                            content = tea_cipher.decrypt_b64(content, sender_key)
+                        except Exception:
+                            self._send(sock, {"type": "error",
+                                              "content": "Decryption failed."})
+                            continue
                 self._process(username, content, buf)
         except (ConnectionResetError, BrokenPipeError, OSError):
             pass
@@ -357,11 +439,36 @@ class ChatServer:
             if not info:
                 return
             ts = datetime.datetime.now().strftime("%H:%M:%S")
-            self._broadcast(info["room"], {
+            # Build base message (plaintext for logging)
+            base_msg = {
                 "type": "message", "username": username,
                 "content": content, "timestamp": ts, "color": info["color"],
-            })
+            }
+            # Send to each user in the room, encrypting per-recipient
+            self._broadcast_encrypted(info["room"], base_msg)
             self._log(f"[{info['room']}] {username}: {content}")
+
+    def _broadcast_encrypted(self, room: str, data: dict,
+                             *, exclude: str | None = None):
+        """Broadcast a message, encrypting the content for each recipient."""
+        with self.lock:
+            users = list(self.rooms.get(room, {}).get("users", []))
+        plaintext = data.get("content", "")
+        for u in users:
+            if u == exclude:
+                continue
+            with self.lock:
+                info = self.clients.get(u)
+            if not info:
+                continue
+            recipient_key = self._get_user_key(u)
+            if recipient_key:
+                msg = dict(data)
+                msg["content"] = tea_cipher.encrypt_b64(plaintext, recipient_key)
+                msg["encrypted"] = True
+                self._send(info["socket"], msg)
+            else:
+                self._send(info["socket"], data)
 
     def _command(self, username: str, text: str, buf: list[str]):
         parts = text.split()

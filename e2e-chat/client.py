@@ -7,6 +7,8 @@ import json
 import sys
 import getpass
 import queue
+import os
+import tea_cipher
 
 DEFAULT_PORT = 5555
 RESET = "\033[0m"
@@ -25,11 +27,16 @@ class ChatClient:
         self._msg_lock = threading.Lock()
         self._msg_ready = threading.Event()
         self._mid_auth_queue: queue.Queue[dict] = queue.Queue()
+        self._encryption_key: bytes | None = None
 
     # ── network ──────────────────────────────────────────────────────
 
     def _send(self, content: str):
-        msg = json.dumps({"content": content}) + "\n"
+        if self._encryption_key and not content.startswith("/"):
+            encrypted = tea_cipher.encrypt_b64(content, self._encryption_key)
+            msg = json.dumps({"content": encrypted, "encrypted": True}) + "\n"
+        else:
+            msg = json.dumps({"content": content}) + "\n"
         self.sock.sendall(msg.encode("utf-8"))
 
     def _recv_loop(self):
@@ -94,6 +101,11 @@ class ChatClient:
             # In chat mode, route to the main thread for masked input
             self._mid_auth_queue.put(msg)
 
+        elif t == "encryption_key":
+            # Store key received from server
+            self._encryption_key = tea_cipher.key_from_b64(msg["key"])
+            self._save_key()
+
         elif t == "error":
             print(f"\n\033[91m✗ {msg['content']}\033[0m", flush=True)
 
@@ -106,6 +118,12 @@ class ChatClient:
             ts = msg.get("timestamp", "")
             user = msg.get("username", "")
             body = msg.get("content", "")
+            # Decrypt if encrypted
+            if msg.get("encrypted") and self._encryption_key:
+                try:
+                    body = tea_cipher.decrypt_b64(body, self._encryption_key)
+                except Exception:
+                    body = "[decryption failed]"
             print(f"\r[{ts}] {color}{user}{RESET}: {body}")
 
         elif t == "system":
@@ -125,6 +143,34 @@ class ChatClient:
         elif t == "quit":
             print(f"\033[93m{msg['content']}\033[0m")
             self.running = False
+
+    # ── local key storage ──────────────────────────────────────────────
+
+    def _key_dir(self) -> str:
+        return os.path.join(".", "users", self.username or "_unknown")
+
+    def _save_key(self):
+        """Save the encryption key to ./users/<username>/key.txt."""
+        if not self.username or not self._encryption_key:
+            return
+        d = self._key_dir()
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, "key.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(tea_cipher.key_to_b64(self._encryption_key) + "\n")
+
+    def _load_key(self) -> bool:
+        """Try to load a locally stored encryption key. Returns True if found."""
+        if not self.username:
+            return False
+        path = os.path.join(self._key_dir(), "key.txt")
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                b64 = f.read().strip()
+                if b64:
+                    self._encryption_key = tea_cipher.key_from_b64(b64)
+                    return True
+        return False
 
     # ── authentication phase ─────────────────────────────────────────
 
@@ -147,6 +193,11 @@ class ChatClient:
 
             elif t == "error":
                 print(f"\033[91m✗ {msg['content']}\033[0m", flush=True)
+
+            elif t == "encryption_key":
+                self._encryption_key = tea_cipher.key_from_b64(msg["key"])
+                self._save_key()
+                print(f"\033[93m⚡ Encryption key received and stored locally.\033[0m")
 
             elif t == "system":
                 print(f"\033[93m⚡ {msg['content']}\033[0m")
@@ -175,6 +226,13 @@ class ChatClient:
             self.sock.close()
             print("Disconnected.")
             return
+
+        # Load locally saved key if server didn't send one
+        if not self._encryption_key:
+            self._load_key()
+
+        if self._encryption_key:
+            print("\033[93m🔐 Encryption active (TEA-CBC 128-bit)\033[0m")
 
         # Phase 2: chat loop
         self.authenticated.set()
