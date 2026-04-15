@@ -12,12 +12,12 @@ import datetime
 import math
 import re
 import os
-import string
 import tea_cipher
+
+import kem
 
 DEFAULT_PORT = 5555
 PASSWORD_FILE = "this_is_safe.txt"
-KEYS_FILE = "user_keys_do_not_steal_plz.txt"
 RULES_FILE = "password_rules.json"
 
 COLORS = [
@@ -41,7 +41,7 @@ class ChatServer:
         self.log_file = open(log_filename, "a", encoding="utf-8")
 
         self.passwords = self._load_passwords()
-        self.user_keys = self._load_keys()
+        self.session_keys: dict[str, bytes] = {}
         self.password_rules = self._load_rules()
 
     # ── password storage ─────────────────────────────────────────────
@@ -76,33 +76,29 @@ class ChatServer:
             for user, data in self.passwords.items():
                 f.write(f"{user}:{data['salt']}:{data['hash']}\n")
 
-    # ── encryption key storage ───────────────────────────────────────
+    # ── KEM handshake (session key exchange) ────────────────────────────
 
-    def _load_keys(self) -> dict[str, dict]:
-        """Load username:{salt, key} from user_keys_do_not_steal_plz.txt."""
-        keys = {}
-        if os.path.exists(KEYS_FILE):
-            with open(KEYS_FILE, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if ":" in line:
-                        parts = line.split(":", 2)
-                        if len(parts) == 3:
-                            user, salt_b64, key_b64 = parts
-                            keys[user] = {"salt": salt_b64, "key": key_b64}
-        return keys
+    def _kem_handshake(self, sock, buf, name: str) -> bytes | None:
+        """RSA-KEM handshake: receive client pubkey, send encrypted session key."""
+        self._send(sock, {"type": "kem_request", "username": name})
+        line = self._read_line(sock, buf)
+        if line is None:
+            return None
+        try:
+            data = json.loads(line)
+            if data.get("type") != "kem_pubkey":
+                return None
+            public_key = kem.pubkey_from_dict(data)
+        except (json.JSONDecodeError, KeyError, ValueError):
+            return None
 
-    def _save_keys(self):
-        with open(KEYS_FILE, "w", encoding="utf-8") as f:
-            for user, data in self.user_keys.items():
-                f.write(f"{user}:{data['salt']}:{data['key']}\n")
+        ciphertext, session_key = kem.encapsulate(public_key)
+        self._send(sock, {"type": "kem_response",
+                          "ciphertext": kem.ct_to_b64(ciphertext)})
+        return session_key
 
-    def _get_user_key(self, username: str) -> bytes | None:
-        """Return the raw 128-bit encryption key for a user, or None."""
-        data = self.user_keys.get(username)
-        if data:
-            return tea_cipher.key_from_b64(data["key"])
-        return None
+    def _get_session_key(self, username: str) -> bytes | None:
+        return self.session_keys.get(username)
 
     def delete_user(self, username: str, notify: bool = True) -> bool:
         """Delete a user account (remove from password file, disconnect if online).
@@ -117,8 +113,7 @@ class ChatServer:
                 return False
             self.passwords.pop(username, None)
             self._save_passwords()
-            self.user_keys.pop(username, None)
-            self._save_keys()
+            self.session_keys.pop(username, None)
             self._log(f"User '{username}' removed from password file")
             sock = self.clients.get(username, {}).get("socket") if username in self.clients else None
 
@@ -277,11 +272,6 @@ class ChatServer:
                                       "content": "Choose your username: "})
                     continue
                 self._log(f"'{name}' authenticated successfully from {addr}")
-                # Send encryption key to client
-                user_key = self.user_keys.get(name)
-                if user_key:
-                    self._send(sock, {"type": "encryption_key",
-                                      "key": user_key["key"]})
 
             # ── New user → register ──
             else:
@@ -294,22 +284,15 @@ class ChatServer:
                 hashed = self._hash_password(pwd, salt)
                 self.passwords[name] = {"salt": salt, "hash": hashed}
                 self._save_passwords()
-
-                # ── Encryption key from user secret ──
-                secret = self._ask_encryption_secret(sock, buf)
-                if secret is None:
-                    return None
-                key_salt = tea_cipher.generate_salt()
-                key = tea_cipher.derive_key(secret, key_salt)
-                self.user_keys[name] = {
-                    "salt": tea_cipher.key_to_b64(key_salt),
-                    "key": tea_cipher.key_to_b64(key),
-                }
-                self._save_keys()
-                # Send key to client so it can store it locally
-                self._send(sock, {"type": "encryption_key",
-                                  "key": tea_cipher.key_to_b64(key)})
                 self._log(f"New account created for '{name}' from {addr}")
+
+            # ── KEM handshake (both login and register) ──
+            session_key = self._kem_handshake(sock, buf, name)
+            if session_key is None:
+                self._send(sock, {"type": "error",
+                                  "content": "Key exchange failed."})
+                return None
+            self._log(f"KEM handshake completed for '{name}'")
 
             # ── Finalize connection ──
             with self.lock:
@@ -321,6 +304,7 @@ class ChatServer:
                 self.clients[name] = {"socket": sock, "address": addr,
                                       "room": "general", "color": color}
                 self.rooms["general"]["users"].add(name)
+                self.session_keys[name] = session_key
             return name
 
     def _new_password_flow(self, sock, buf) -> str | None:
@@ -367,23 +351,6 @@ class ChatServer:
                               "content": f"Password strength: {strength} ({entropy:.0f} bits)"})
             return pwd
 
-    def _ask_encryption_secret(self, sock, buf) -> str | None:
-        """Ask the user for a secret to derive their encryption key."""
-        self._send(sock, {"type": "system",
-                          "content": "Now choose a secret to generate your encryption key."})
-        self._send(sock, {"type": "auth_prompt",
-                          "content": "Encryption secret: "})
-        line = self._read_line(sock, buf)
-        if line is None:
-            return None
-        try:
-            secret = json.loads(line).get("content", "")
-        except json.JSONDecodeError:
-            return None
-        if not secret:
-            return None
-        return secret
-
     def handle_client(self, sock, addr):
         buf = [""]
         username = None
@@ -413,7 +380,7 @@ class ChatServer:
                     continue
                 # Decrypt if encrypted
                 if encrypted:
-                    sender_key = self._get_user_key(username)
+                    sender_key = self._get_session_key(username)
                     if sender_key:
                         try:
                             content = tea_cipher.decrypt_b64(content, sender_key)
@@ -461,7 +428,7 @@ class ChatServer:
                 info = self.clients.get(u)
             if not info:
                 continue
-            recipient_key = self._get_user_key(u)
+            recipient_key = self._get_session_key(u)
             if recipient_key:
                 msg = dict(data)
                 msg["content"] = tea_cipher.encrypt_b64(plaintext, recipient_key)
@@ -603,6 +570,7 @@ class ChatServer:
     def _disconnect(self, username: str):
         with self.lock:
             info = self.clients.pop(username, None)
+            self.session_keys.pop(username, None)
             if info is None:
                 return
             room = info["room"]

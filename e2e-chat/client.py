@@ -8,7 +8,9 @@ import sys
 import getpass
 import queue
 import os
+import base64
 import tea_cipher
+import kem
 
 DEFAULT_PORT = 5555
 RESET = "\033[0m"
@@ -30,6 +32,11 @@ class ChatClient:
         self._encryption_key: bytes | None = None
 
     # ── network ──────────────────────────────────────────────────────
+
+    def _send_raw(self, data: dict):
+        """Send a JSON message without encryption (for KEM handshake)."""
+        raw = json.dumps(data) + "\n"
+        self.sock.sendall(raw.encode("utf-8"))
 
     def _send(self, content: str):
         if self._encryption_key and not content.startswith("/"):
@@ -101,11 +108,6 @@ class ChatClient:
             # In chat mode, route to the main thread for masked input
             self._mid_auth_queue.put(msg)
 
-        elif t == "encryption_key":
-            # Store key received from server
-            self._encryption_key = tea_cipher.key_from_b64(msg["key"])
-            self._save_key()
-
         elif t == "error":
             print(f"\n\033[91m✗ {msg['content']}\033[0m", flush=True)
 
@@ -144,33 +146,28 @@ class ChatClient:
             print(f"\033[93m{msg['content']}\033[0m")
             self.running = False
 
-    # ── local key storage ──────────────────────────────────────────────
+    # ── RSA key management ──────────────────────────────────────────────
 
     def _key_dir(self) -> str:
         return os.path.join(".", "users", self.username or "_unknown")
 
-    def _save_key(self):
-        """Save the encryption key to ./users/<username>/key.txt."""
-        if not self.username or not self._encryption_key:
-            return
+    def _load_or_generate_keypair(self):
+        """Load or generate RSA keypair for this user."""
         d = self._key_dir()
         os.makedirs(d, exist_ok=True)
-        path = os.path.join(d, "key.txt")
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(tea_cipher.key_to_b64(self._encryption_key) + "\n")
+        priv_path = os.path.join(d, f"{self.username}.priv")
+        pub_path = os.path.join(d, f"{self.username}.pub")
 
-    def _load_key(self) -> bool:
-        """Try to load a locally stored encryption key. Returns True if found."""
-        if not self.username:
-            return False
-        path = os.path.join(self._key_dir(), "key.txt")
-        if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as f:
-                b64 = f.read().strip()
-                if b64:
-                    self._encryption_key = tea_cipher.key_from_b64(b64)
-                    return True
-        return False
+        if os.path.exists(priv_path) and os.path.exists(pub_path):
+            self._rsa_priv = kem.load_private_key(priv_path)
+            self._rsa_pub = kem.load_public_key(pub_path)
+            print("\033[93m🔑 RSA keypair loaded.\033[0m")
+        else:
+            print("\033[93m🔑 Generating RSA keypair…\033[0m", flush=True)
+            self._rsa_pub, self._rsa_priv = kem.generate_keypair()
+            kem.save_private_key(self._rsa_priv, priv_path)
+            kem.save_public_key(self._rsa_pub, pub_path)
+            print("\033[93m🔑 RSA keypair saved.\033[0m")
 
     # ── authentication phase ─────────────────────────────────────────
 
@@ -194,10 +191,17 @@ class ChatClient:
             elif t == "error":
                 print(f"\033[91m✗ {msg['content']}\033[0m", flush=True)
 
-            elif t == "encryption_key":
-                self._encryption_key = tea_cipher.key_from_b64(msg["key"])
-                self._save_key()
-                print(f"\033[93m⚡ Encryption key received and stored locally.\033[0m")
+            elif t == "kem_request":
+                self.username = msg.get("username")
+                self._load_or_generate_keypair()
+                pub_dict = kem.pubkey_to_dict(self._rsa_pub)
+                pub_dict["type"] = "kem_pubkey"
+                self._send_raw(pub_dict)
+
+            elif t == "kem_response":
+                ct = kem.ct_from_b64(msg["ciphertext"])
+                self._encryption_key = kem.decapsulate(ct, self._rsa_priv)
+                print("\033[93m🔐 Session key established via KEM.\033[0m")
 
             elif t == "system":
                 print(f"\033[93m⚡ {msg['content']}\033[0m")
@@ -227,12 +231,8 @@ class ChatClient:
             print("Disconnected.")
             return
 
-        # Load locally saved key if server didn't send one
-        if not self._encryption_key:
-            self._load_key()
-
         if self._encryption_key:
-            print("\033[93m🔐 Encryption active (TEA-CBC 128-bit)\033[0m")
+            print("\033[93m🔐 Encryption active (RSA-KEM + TEA-CBC 128-bit)\033[0m")
 
         # Phase 2: chat loop
         self.authenticated.set()
