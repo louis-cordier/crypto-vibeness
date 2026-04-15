@@ -506,6 +506,7 @@ class ChatServer:
                 "Commands:\n"
                 "  /rooms                       – List all rooms\n"
                 "  /create <name> [password]     – Create a room\n"
+                "  /delete <name>                – Delete a room you created\n"
                 "  /join <name> [password]       – Join a room\n"
                 "  /leave                        – Back to general\n"
                 "  /who                          – Users in current room\n"
@@ -537,6 +538,35 @@ class ChatServer:
             self._send(sock, {"type": "system",
                               "content": f"Room '{name}' created{tag}."})
             self._log(f"{username} created room '{name}'{tag}")
+
+        elif cmd == "/delete":
+            if len(parts) < 2:
+                self._send(sock, {"type": "error",
+                                  "content": "Usage: /delete <name>"})
+                return
+            name = parts[1]
+            if name == "general":
+                self._send(sock, {"type": "error",
+                                  "content": "Cannot delete room 'general'."})
+                return
+            with self.lock:
+                if name not in self.rooms:
+                    self._send(sock, {"type": "error",
+                                      "content": f"Room '{name}' does not exist."})
+                    return
+                displaced = list(self.rooms[name]["users"])
+                for u in displaced:
+                    self.clients[u]["room"] = "general"
+                    self.rooms["general"]["users"].add(u)
+                del self.rooms[name]
+            for u in displaced:
+                if u != username:
+                    self._send(self.clients[u]["socket"], {"type": "system",
+                        "content": f"Room '{name}' has been deleted by {username}. "
+                                   f"You are back in 'general'."})
+            self._send(sock, {"type": "system",
+                              "content": f"Room '{name}' deleted."})
+            self._log(f"{username} deleted room '{name}' ({len(displaced)} users moved)")
 
         elif cmd == "/join":
             if len(parts) < 2:
