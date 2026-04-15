@@ -17,6 +17,92 @@ DEFAULT_PORT = 5555
 RESET = "\033[0m"
 
 
+# ── server discovery ─────────────────────────────────────────────────
+
+def _get_local_ip() -> str:
+    """Return the local IP address used for LAN communication."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except OSError:
+        return "127.0.0.1"
+
+
+def _probe_server(ip: str, port: int, results: list, lock: threading.Lock):
+    """Try to connect to ip:port and check for a chat server prompt."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.6)
+        s.connect((ip, port))
+        data = s.recv(1024).decode("utf-8", errors="ignore")
+        s.close()
+        if '"prompt"' in data or '"type"' in data:
+            with lock:
+                results.append(ip)
+    except (OSError, ConnectionRefusedError, TimeoutError):
+        pass
+
+
+def discover_servers(port: int) -> list[str]:
+    """Scan the local /24 subnet for chat servers on the given port."""
+    local_ip = _get_local_ip()
+    prefix = ".".join(local_ip.split(".")[:3]) + "."
+
+    print(f"\033[93m🔍 Scanning network {prefix}0/24 on port {port}...\033[0m")
+
+    results: list[str] = []
+    lock = threading.Lock()
+    threads: list[threading.Thread] = []
+
+    # Also probe localhost
+    for i in list(range(1, 255)) + [0]:
+        ip = "127.0.0.1" if i == 0 else prefix + str(i)
+        t = threading.Thread(target=_probe_server, args=(ip, port, results, lock))
+        t.start()
+        threads.append(t)
+        # Limit concurrency to avoid socket exhaustion
+        if len(threads) >= 50:
+            for tt in threads:
+                tt.join()
+            threads.clear()
+
+    for t in threads:
+        t.join()
+
+    return results
+
+
+def select_server(port: int) -> str:
+    """Discover servers and let the user pick one, or enter an IP manually."""
+    servers = discover_servers(port)
+
+    if not servers:
+        print("\033[91m❌ No servers found on the network.\033[0m")
+        manual = input("Enter server IP manually (or 'q' to quit): ").strip()
+        if manual.lower() == "q":
+            sys.exit(0)
+        return manual
+
+    print(f"\033[92m✅ Found {len(servers)} server(s):\033[0m")
+    for i, ip in enumerate(servers, 1):
+        label = " (localhost)" if ip == "127.0.0.1" else ""
+        print(f"  {i}. {ip}{label}")
+    print(f"  {len(servers) + 1}. Enter IP manually")
+
+    while True:
+        choice = input(f"Select server [1-{len(servers) + 1}]: ").strip()
+        if choice.isdigit():
+            n = int(choice)
+            if 1 <= n <= len(servers):
+                return servers[n - 1]
+            if n == len(servers) + 1:
+                return input("Enter server IP: ").strip()
+        print("Invalid choice.")
+
+
 class ChatClient:
     def __init__(self, host: str, port: int):
         self.host = host
@@ -427,10 +513,21 @@ class ChatClient:
 
 
 if __name__ == "__main__":
-    host = "localhost"
     port = DEFAULT_PORT
+    host = None
+
     if len(sys.argv) > 1:
-        port = int(sys.argv[1])
-    if len(sys.argv) > 2:
-        host = sys.argv[2]
+        # First arg could be host or port
+        if sys.argv[1].replace(".", "").isdigit() and "." in sys.argv[1]:
+            host = sys.argv[1]
+            if len(sys.argv) > 2:
+                port = int(sys.argv[2])
+        else:
+            port = int(sys.argv[1])
+            if len(sys.argv) > 2:
+                host = sys.argv[2]
+
+    if host is None:
+        host = select_server(port)
+
     ChatClient(host, port).start()
