@@ -28,13 +28,14 @@ RESET = "\033[0m"
 
 
 class ChatServer:
-    def __init__(self, port):
+    def __init__(self, port, tamper_next_dm: bool = False):
         self.port = port
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.clients = {}  # username -> {socket, address, room, color}
         self.rooms = {"general": {"password": None, "users": set()}}
         self.lock = threading.Lock()
+        self.tamper_next_dm = tamper_next_dm  # ⚠️ demo flag: corrupt next DM to prove signature works
 
         now = datetime.datetime.now()
         log_filename = f"log_{now.strftime('%Y-%m-%d_%H-%M-%S')}.txt"
@@ -230,8 +231,21 @@ class ChatServer:
             if info:
                 fwd = {k: v for k, v in raw.items() if k != "to"}
                 fwd["from"] = username
+                # ⚠️  --tamper-next-dm demo: corrupt ciphertext to trigger signature alert
+                if self.tamper_next_dm:
+                    original = fwd.get("content", "")
+                    # Flip a byte in the middle of the base64 ciphertext
+                    mid = len(original) // 2
+                    corrupted = original[:mid] + ("X" if original[mid] != "X" else "Y") + original[mid + 1:]
+                    fwd["content"] = corrupted
+                    self.tamper_next_dm = False
+                    self._log(f"[⚠️  TAMPER] Corrupted DM from {username} → {target} "
+                              f"(--tamper-next-dm demo)")
+                    print(f"\033[91m[⚠️  TAMPER] DM de {username} altéré — "
+                          f"le destinataire devrait voir une alerte signature.\033[0m", flush=True)
+                else:
+                    self._log(f"DM (E2EE): {username} → {target}")
                 self._send(info["socket"], fwd)
-                self._log(f"DM (E2EE): {username} → {target}")
             else:
                 self._send(sock, {"type": "error",
                                   "content": f"User '{target}' is not online."})
@@ -769,5 +783,12 @@ if __name__ == "__main__":
             print(f"User '{user}' not found in {PASSWORD_FILE}.")
             sys.exit(1)
 
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_PORT
-    ChatServer(port).start()
+    tamper = "--tamper-next-dm" in sys.argv
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    port = int(args[0]) if args else DEFAULT_PORT
+
+    if tamper:
+        print("\033[91m⚠️  MODE TAMPER ACTIF — le prochain DM sera corrompu "
+              "pour démontrer la protection par signature RSA.\033[0m", flush=True)
+
+    ChatServer(port, tamper_next_dm=tamper).start()

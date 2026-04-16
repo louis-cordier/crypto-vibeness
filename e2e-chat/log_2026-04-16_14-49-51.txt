@@ -1,0 +1,21 @@
+[2026-04-16 14:49:51] Server listening on port 5555
+[2026-04-16 14:50:05] New connection from ('172.18.80.1', 63346)
+[2026-04-16 14:50:07] New connection from ('172.18.80.190', 43596)
+[2026-04-16 14:50:08] New connection from ('127.0.0.1', 39006)
+[2026-04-16 14:50:13] New connection from ('172.18.80.1', 63348)
+[2026-04-16 14:50:27] New account created for 'nans' from ('172.18.80.1', 63348)
+[2026-04-16 14:50:27] KEM handshake completed for 'nans'
+[2026-04-16 14:50:27] nans connected from ('172.18.80.1', 63348)
+[2026-04-16 14:50:27] nans joined room 'general'
+[2026-04-16 14:50:35] New connection from ('172.18.80.1', 63354)
+[2026-04-16 14:50:37] New connection from ('172.18.80.190', 51568)
+[2026-04-16 14:50:38] New connection from ('127.0.0.1', 35826)
+[2026-04-16 14:50:41] New connection from ('172.18.80.1', 63356)
+[2026-04-16 14:50:56] New account created for 'nans2' from ('172.18.80.1', 63356)
+[2026-04-16 14:50:57] KEM handshake completed for 'nans2'
+[2026-04-16 14:50:57] nans2 connected from ('172.18.80.1', 63356)
+[2026-04-16 14:50:57] nans2 joined room 'general'
+[2026-04-16 14:51:04] [general] nans2: lol
+[2026-04-16 14:51:16] DM key exchange: nans2 → nans
+[2026-04-16 14:51:16] [⚠️  TAMPER] Corrupted DM from nans2 → nans (--tamper-next-dm demo)
+[2026-04-16 14:52:08] DM (E2EE): nans2 → nans
