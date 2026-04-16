@@ -119,6 +119,8 @@ class ChatClient:
         self._encryption_key: bytes | None = None
         self._rsa_pub: tuple[int, int] | None = None
         self._rsa_priv: tuple[int, int] | None = None
+        self._room_key: bytes | None = None    # derived from room password (protected rooms)
+        self._current_room: str = "general"
         # E2EE state for DMs
         self._peer_keys: dict[str, bytes] = {}       # peer -> session key
         self._peer_pubkeys: dict[str, tuple] = {}    # peer -> RSA pubkey
@@ -134,15 +136,41 @@ class ChatClient:
 
     def _send(self, content: str):
         if self._encryption_key and not content.startswith("/"):
-            # Sign the plaintext
-            sig = kem.rsa_sign(content.encode("utf-8"), self._rsa_priv)
-            sig_b64 = base64.b64encode(sig).decode()
-            encrypted = tea_cipher.encrypt_b64(content, self._encryption_key)
-            msg = json.dumps({"content": encrypted, "encrypted": True,
-                              "signature": sig_b64}) + "\n"
+            if self._room_key:
+                # Protected room: encrypt with room_key first (server cannot read this layer)
+                room_ct = tea_cipher.encrypt_b64(content, self._room_key)
+                # Sign the room-ciphertext (server verifies this; cannot see plaintext)
+                sig = kem.rsa_sign(room_ct.encode("utf-8"), self._rsa_priv)
+                sig_b64 = base64.b64encode(sig).decode()
+                # Wrap in session encryption for transport
+                outer_ct = tea_cipher.encrypt_b64(room_ct, self._encryption_key)
+                msg = json.dumps({"content": outer_ct, "encrypted": True,
+                                  "room_encrypted": True, "signature": sig_b64}) + "\n"
+            else:
+                # Open room: encrypt + sign plaintext normally
+                sig = kem.rsa_sign(content.encode("utf-8"), self._rsa_priv)
+                sig_b64 = base64.b64encode(sig).decode()
+                encrypted = tea_cipher.encrypt_b64(content, self._encryption_key)
+                msg = json.dumps({"content": encrypted, "encrypted": True,
+                                  "signature": sig_b64}) + "\n"
         else:
             msg = json.dumps({"content": content}) + "\n"
         self.sock.sendall(msg.encode("utf-8"))
+
+    def _update_room_context(self, text: str):
+        """Track current room and derive room_key when joining a protected room."""
+        parts = text.split()
+        cmd = parts[0].lower() if parts else ""
+        if cmd == "/join" and len(parts) >= 2:
+            self._current_room = parts[1]
+            if len(parts) >= 3:
+                self._room_key = tea_cipher.derive_key(parts[2], parts[1].encode())
+                print(f"\033[93m🔒 Room key derived — messages are E2EE with room password.\033[0m")
+            else:
+                self._room_key = None
+        elif cmd in ("/leave", "/quit"):
+            self._room_key = None
+            self._current_room = "general"
 
     def _recv_loop(self):
         """Receive messages: queue during auth, display after."""
@@ -222,14 +250,23 @@ class ChatClient:
                     body = tea_cipher.decrypt_b64(body, self._encryption_key)
                 except Exception:
                     body = "[decryption failed]"
-            # Verify signature if present
+            # Verify signature if present.
+            # For room_encrypted messages, signature is over room_ct (body at this point).
+            # For plain messages, signature is over the plaintext (body at this point).
             sig_b64 = msg.get("signature")
             sender_pk = msg.get("sender_pubkey")
+            signed_content = body  # capture before room decryption for signature check
+            # Second layer: room password encryption
+            if msg.get("room_encrypted") and self._room_key:
+                try:
+                    body = tea_cipher.decrypt_b64(body, self._room_key)
+                except Exception:
+                    body = "[room decryption failed — wrong room password?]"
             if sig_b64 and sender_pk:
                 try:
                     sig = base64.b64decode(sig_b64)
                     pubkey = kem.pubkey_from_dict(sender_pk)
-                    if not kem.rsa_verify(body.encode("utf-8"), sig, pubkey):
+                    if not kem.rsa_verify(signed_content.encode("utf-8"), sig, pubkey):
                         print(f"\r\033[91m⚠️  SECURITY ALERT: Message from "
                               f"{user} has INVALID signature!\033[0m")
                         return
@@ -492,6 +529,7 @@ class ChatClient:
                     self.running = False
                     break
                 else:
+                    self._update_room_context(text.strip())
                     self._send(text)
                 # If server replies with an auth_prompt (e.g. /deleteaccount),
                 # handle it here in the main thread with hidden input

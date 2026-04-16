@@ -1,0 +1,38 @@
+[2026-04-16 13:18:34] Server listening on port 5555
+[2026-04-16 13:18:46] New connection from ('172.18.80.1', 59072)
+[2026-04-16 13:18:48] New connection from ('172.18.80.190', 32954)
+[2026-04-16 13:18:49] New connection from ('127.0.0.1', 37336)
+[2026-04-16 13:18:54] New connection from ('172.18.80.1', 59073)
+[2026-04-16 13:20:41] New account created for '1' from ('172.18.80.1', 59073)
+[2026-04-16 13:20:41] KEM handshake completed for '1'
+[2026-04-16 13:20:41] 1 connected from ('172.18.80.1', 59073)
+[2026-04-16 13:20:41] 1 joined room 'general'
+[2026-04-16 13:20:48] New connection from ('172.18.80.1', 54765)
+[2026-04-16 13:20:50] New connection from ('172.18.80.190', 33218)
+[2026-04-16 13:20:51] New connection from ('127.0.0.1', 46780)
+[2026-04-16 13:20:53] New connection from ('172.18.80.1', 54766)
+[2026-04-16 13:21:05] New account created for 'nans2' from ('172.18.80.1', 54766)
+[2026-04-16 13:21:05] KEM handshake completed for 'nans2'
+[2026-04-16 13:21:05] nans2 connected from ('172.18.80.1', 54766)
+[2026-04-16 13:21:05] nans2 joined room 'general'
+[2026-04-16 13:21:08] [general] nans2: aaaa
+[2026-04-16 13:21:18] DM key exchange: 1 → nans2
+[2026-04-16 13:21:18] DM (E2EE): 1 → nans2
+[2026-04-16 13:21:28] 1 created room 'aaaa'
+[2026-04-16 13:21:32] 1 moved from 'general' to 'aaaa'
+[2026-04-16 13:21:38] nans2 moved from 'general' to 'aaaa'
+[2026-04-16 13:21:42] [aaaa] nans2: aaaa
+[2026-04-16 13:22:03] nans2 left 'aaaa' → 'general'
+[2026-04-16 13:22:08] nans2 created room 'aaaa-privé'
+[2026-04-16 13:22:39] nans2 deleted room 'aaaa-privé' (0 users moved)
+[2026-04-16 13:22:47] nans2 created room 'aaaa-privé' (password-protected)
+[2026-04-16 13:23:04] nans2 moved from 'general' to 'aaaa-privé'
+[2026-04-16 13:23:06] [aaaa-privé] nans2: [🔒 encrypted message]
+[2026-04-16 13:23:15] [aaaa-privé] nans2: [🔒 encrypted message]
+[2026-04-16 13:23:16] [aaaa-privé] nans2: [🔒 encrypted message]
+[2026-04-16 13:23:17] [aaaa-privé] nans2: [🔒 encrypted message]
+[2026-04-16 13:23:55] 1 moved from 'aaaa' to 'aaaa-privé'
+[2026-04-16 13:23:56] [aaaa-privé] 1: [🔒 encrypted message]
+[2026-04-16 13:23:57] [aaaa-privé] 1: [🔒 encrypted message]
+[2026-04-16 13:23:59] [aaaa-privé] 1: [🔒 encrypted message]
+[2026-04-16 13:24:01] [aaaa-privé] 1: [🔒 encrypted message]

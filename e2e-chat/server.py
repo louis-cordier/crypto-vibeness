@@ -426,6 +426,7 @@ class ChatServer:
                     content = raw.get("content", "")
                     encrypted = raw.get("encrypted", False)
                     signature = raw.get("signature")
+                    room_encrypted = raw.get("room_encrypted", False)
                 except json.JSONDecodeError:
                     continue
                 # E2EE messages: relay as opaque blobs
@@ -442,7 +443,8 @@ class ChatServer:
                             self._send(sock, {"type": "error",
                                               "content": "Decryption failed."})
                             continue
-                self._process(username, content, buf, signature=signature)
+                self._process(username, content, buf, signature=signature,
+                              room_encrypted=room_encrypted)
         except (ConnectionResetError, BrokenPipeError, OSError):
             pass
         finally:
@@ -452,14 +454,43 @@ class ChatServer:
     # ── message processing ───────────────────────────────────────────
 
     def _process(self, username: str, content: str, buf: list[str],
-                 *, signature: str | None = None):
+                 *, signature: str | None = None, room_encrypted: bool = False):
         if content.startswith("/"):
             self._command(username, content, buf)
         else:
             with self.lock:
                 info = self.clients.get(username)
+                room_pwd = self.rooms.get(info["room"], {}).get("password") if info else None
             if not info:
                 return
+            sock = info["socket"]
+
+            # Password-protected rooms require a valid RSA signature.
+            # When room_encrypted=True, content is the room_ct (inner ciphertext),
+            # the signature is over room_ct — the server never sees the plaintext.
+            if room_pwd is not None:
+                if not signature:
+                    self._send(sock, {"type": "error",
+                                      "content": "Messages in protected rooms must be signed."})
+                    self._log(f"[SECURITY] Unsigned message rejected from {username} "
+                              f"in protected room '{info['room']}'")
+                    return
+                pubkey_dict = self.public_keys.get(username)
+                if pubkey_dict:
+                    try:
+                        pubkey = kem.pubkey_from_dict(pubkey_dict)
+                        sig_bytes = base64.b64decode(signature)
+                        if not kem.rsa_verify(content.encode("utf-8"), sig_bytes, pubkey):
+                            self._send(sock, {"type": "error",
+                                              "content": "Invalid signature — message rejected."})
+                            self._log(f"[SECURITY] Invalid signature from {username} "
+                                      f"in protected room '{info['room']}'")
+                            return
+                    except Exception:
+                        self._send(sock, {"type": "error",
+                                          "content": "Signature verification error."})
+                        return
+
             ts = datetime.datetime.now().strftime("%H:%M:%S")
             base_msg = {
                 "type": "message", "username": username,
@@ -467,17 +498,24 @@ class ChatServer:
             }
             if signature:
                 base_msg["signature"] = signature
+            if room_encrypted:
+                base_msg["room_encrypted"] = True
             self._broadcast_encrypted(info["room"], base_msg)
-            self._log(f"[{info['room']}] {username}: {content}")
+            if room_encrypted:
+                self._log(f"[{info['room']}] {username}: [🔒 encrypted message]")
+            else:
+                self._log(f"[{info['room']}] {username}: {content}")
 
     def _broadcast_encrypted(self, room: str, data: dict,
                              *, exclude: str | None = None):
         """Broadcast a message, encrypting the content for each recipient."""
         with self.lock:
-            users = list(self.rooms.get(room, {}).get("users", []))
-        plaintext = data.get("content", "")
+            room_info = self.rooms.get(room, {})
+            users = list(room_info.get("users", []))
+        payload = data.get("content", "")   # plaintext OR room_ct if room_encrypted
         sender = data.get("username", "")
         sender_pubkey = self.public_keys.get(sender)
+        is_room_encrypted = data.get("room_encrypted", False)
         for u in users:
             if u == exclude:
                 continue
@@ -488,8 +526,10 @@ class ChatServer:
             recipient_key = self._get_session_key(u)
             if recipient_key:
                 msg = dict(data)
-                msg["content"] = tea_cipher.encrypt_b64(plaintext, recipient_key)
+                msg["content"] = tea_cipher.encrypt_b64(payload, recipient_key)
                 msg["encrypted"] = True
+                if is_room_encrypted:
+                    msg["room_encrypted"] = True
                 if sender_pubkey:
                     msg["sender_pubkey"] = sender_pubkey
                 self._send(info["socket"], msg)
